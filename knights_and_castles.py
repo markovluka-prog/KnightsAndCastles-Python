@@ -7,13 +7,18 @@ import os
 import random
 
 # ========================== КОНСТАНТЫ ==========================
-CELL_SIZE = 48
 COLS = 10
 ROWS = 20
-SIDEBAR_WIDTH = 280
+FPS = 30
+
+# Автоматический размер ячейки под экран
+pygame.init()
+_info = pygame.display.Info()
+_max_h = _info.current_h - 60  # запас под панель задач
+CELL_SIZE = min(48, _max_h // ROWS)
+SIDEBAR_WIDTH = min(280, int(CELL_SIZE * 5.8))
 WIDTH = COLS * CELL_SIZE + SIDEBAR_WIDTH
 HEIGHT = ROWS * CELL_SIZE
-FPS = 30
 
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                        "Tiny Swords", "Tiny Swords (Free Pack)")
@@ -367,11 +372,7 @@ class Board:
 
 class Game:
     def __init__(self):
-        pygame.init()
-        flags = pygame.FULLSCREEN
-        if hasattr(pygame, "SCALED"):
-            flags |= pygame.SCALED
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT), flags)
+        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         pygame.display.set_caption("Рыцари и Замки")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("Arial", 13)
