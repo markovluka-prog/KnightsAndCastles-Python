@@ -164,12 +164,20 @@ class SpriteManager:
         self.monastery_img = load_sprite("Buildings/Blue Buildings/Monastery.png",
                                           (cs * 2, cs * 2))
 
-        self.tilemap = load_sprite("Terrain/Tileset/Tilemap_color1.png")
-        self.ground_tile = None
-        if self.tilemap:
-            self.ground_tile = pygame.Surface((64, 64), pygame.SRCALPHA)
-            self.ground_tile.blit(self.tilemap, (0, 0), pygame.Rect(64, 0, 64, 64))
-            self.ground_tile = pygame.transform.smoothscale(self.ground_tile, (cs, cs))
+        # Flat checkerboard ground tiles (no 3D trapezoid effect)
+        self.ground_tile_a = pygame.Surface((cs, cs))
+        self.ground_tile_a.fill((85, 120, 50))
+        self.ground_tile_b = pygame.Surface((cs, cs))
+        self.ground_tile_b.fill((78, 112, 45))
+        self.ground_tile = self.ground_tile_a  # kept for compat
+
+        # Cavalry rendered larger for clarity
+        large_cs = int(cs * 1.8)
+        self.cavalry_size = large_cs
+        for color, team in [("Blue", 1), ("Red", 2)]:
+            prefix = f"Units/{color} Units"
+            l_sheet = load_sprite(f"{prefix}/Lancer/Lancer_Idle.png")
+            self.units[(team, "cavalry")] = extract_frame(l_sheet, 0, 320, 320, (large_cs, large_cs))
 
     def get_unit(self, player, unit_type):
         return self.units.get((player, unit_type))
@@ -368,13 +376,408 @@ class Board:
         return self.ruins.contains(r, c)
 
 
+# ========================== МЕНЮ ==========================
+
+class MenuScreen:
+    """Предигровой экран: обложка + правила + выбор режима."""
+
+    RULES_PLACEHOLDER = [
+        "ПРАВИЛА ИГРЫ",
+        "",
+        "Цель: уничтожить все юниты противника.",
+        "",
+        "ЮНИТЫ:",
+        "  Рыцарь    — HP 3  | Урон 5 | Броня 4 | Ходы 2",
+        "  Кон. рыцарь — HP 5  | Урон 6 | Броня 3 | Ходы 3",
+        "  Лучник    — HP 3  | Урон 2 | Броня 1 | Ходы 3",
+        "",
+        "ХОД:",
+        "  Каждый ход вы активируете до 3 юнитов.",
+        "  ЛКМ — выбрать юнит, затем кликнуть клетку.",
+        "  ПКМ / Space — пропустить юнит.",
+        "",
+        "АТАКА:",
+        "  Рыцарь/Конный — прыжковая атака (2 хода).",
+        "  Лучник — стреляет в соседнюю клетку (1 ход).",
+        "  Броня поглощает часть урона.",
+        "",
+        "БАШНЯ МАГА:",
+        "  Зайди юнитом в башню.",
+        "  При наличии артефактов — можно применить заклинание.",
+        "  Дождь защиты: +2 HP всем своим.",
+        "  Сталь свободы: +2 Броня всем своим.",
+        "  Небо огня: щит на 1 ход противника (-2 к урону).",
+        "",
+        "РУИНЫ (центр поля):",
+        "  Зайди юнитом в руины → кнопка 'Тянуть артефакт'.",
+        "  Артефакты нужны для заклинаний и крафта оружия.",
+        "",
+        "КРАФТ ОРУЖИЯ:",
+        "  Солнечный меч (+3 урон, любому юниту).",
+        "  Синий лук (+2 урон, только лучнику).",
+        "",
+        "ПОБЕДА:",
+        "  Игрок победивший уничтоживший всех юнитов врага — побеждает.",
+        "",
+        "",
+        "  (Дополнительные правила будут добавлены позже)",
+        "",
+    ]
+
+    def __init__(self, screen, clock):
+        self.screen = screen
+        self.clock = clock
+        self.font       = pygame.font.SysFont("Arial", 14)
+        self.font_big   = pygame.font.SysFont("Arial", 20, bold=True)
+        self.font_title = pygame.font.SysFont("Arial", 32, bold=True)
+        self.font_small = pygame.font.SysFont("Arial", 12)
+
+        # Обложка
+        cover_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "Knights_and_Castles_1920x1080.png")
+        if os.path.exists(cover_path):
+            raw = pygame.image.load(cover_path).convert()
+            self.cover = pygame.transform.smoothscale(raw, (WIDTH, HEIGHT))
+        else:
+            self.cover = None
+
+        # Контент правил в пикселях
+        self.rule_line_h = 20
+        self.rules_top   = HEIGHT        # правила начинаются ниже обложки
+        self.rules_h     = len(self.RULES_PLACEHOLDER) * self.rule_line_h + 40
+        self.total_h     = self.rules_top + self.rules_h + 100  # +100 запас
+
+        self.scroll_y   = 0             # текущий скролл (в пикселях)
+        self.max_scroll  = max(0, self.total_h - HEIGHT + 80)  # 80 под кнопки
+
+        # Кнопки (фиксированы внизу экрана)
+        self.btn_h = 50
+        self.btn_w = (WIDTH - 60) // 2
+        self.btn1_rect = pygame.Rect(20,          HEIGHT - self.btn_h - 10, self.btn_w, self.btn_h)
+        self.btn2_rect = pygame.Rect(WIDTH // 2 + 10, HEIGHT - self.btn_h - 10, self.btn_w, self.btn_h)
+
+    def run(self):
+        """Главный цикл меню. Возвращает '2p' или 'ai'."""
+        while True:
+            self.clock.tick(FPS)
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    sys.exit()
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 1:
+                        mode = self._handle_click(*event.pos)
+                        if mode:
+                            return mode
+                    elif event.button == 4:   # колёсико вверх
+                        self.scroll_y = max(0, self.scroll_y - 40)
+                    elif event.button == 5:   # колёсико вниз
+                        self.scroll_y = min(self.max_scroll, self.scroll_y + 40)
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        pygame.quit()
+                        sys.exit()
+                    elif event.key in (pygame.K_DOWN, pygame.K_s):
+                        self.scroll_y = min(self.max_scroll, self.scroll_y + 40)
+                    elif event.key in (pygame.K_UP, pygame.K_w):
+                        self.scroll_y = max(0, self.scroll_y - 40)
+            self._draw()
+
+    def _handle_click(self, mx, my):
+        if self.btn1_rect.collidepoint(mx, my):
+            return "2p"
+        if self.btn2_rect.collidepoint(mx, my):
+            return "ai"
+        return None
+
+    def _draw(self):
+        self.screen.fill((20, 15, 10))
+        sy = self.scroll_y
+
+        # --- Обложка (первый экран) ---
+        if self.cover:
+            self.screen.blit(self.cover, (0, -sy))
+        else:
+            # Заглушка если файл не найден
+            pygame.draw.rect(self.screen, (60, 40, 20), (0, -sy, WIDTH, HEIGHT))
+            t = self.font_title.render("Рыцари и Замки", True, (255, 215, 0))
+            self.screen.blit(t, ((WIDTH - t.get_width()) // 2, HEIGHT // 2 - sy - 20))
+
+        # Затемнение в нижней части обложки (переход к правилам)
+        if sy < HEIGHT:
+            fade_start = max(0, HEIGHT - sy - 120)
+            fade_h = min(120, HEIGHT - fade_start)
+            fade = pygame.Surface((WIDTH, fade_h), pygame.SRCALPHA)
+            for i in range(fade_h):
+                alpha = int(255 * i / fade_h)
+                pygame.draw.line(fade, (20, 15, 10, alpha), (0, i), (WIDTH, i))
+            self.screen.blit(fade, (0, fade_start))
+
+        # --- Правила (ниже обложки) ---
+        rules_screen_y = self.rules_top - sy
+        if rules_screen_y < HEIGHT:
+            # Фон правил
+            rules_rect_y = max(0, rules_screen_y)
+            pygame.draw.rect(self.screen, (25, 18, 12),
+                             (0, rules_rect_y, WIDTH, HEIGHT - rules_rect_y))
+
+            x0 = 40
+            y0 = rules_screen_y + 20
+            for line in self.RULES_PLACEHOLDER:
+                if y0 > HEIGHT:
+                    break
+                if y0 < -self.rule_line_h:
+                    y0 += self.rule_line_h
+                    continue
+                if line == "ПРАВИЛА ИГРЫ":
+                    t = self.font_title.render(line, True, (255, 215, 0))
+                    self.screen.blit(t, ((WIDTH - t.get_width()) // 2, y0))
+                elif line.isupper() and line:
+                    t = self.font_big.render(line, True, (200, 170, 100))
+                    self.screen.blit(t, (x0, y0))
+                elif line:
+                    t = self.font.render(line, True, (200, 190, 170))
+                    self.screen.blit(t, (x0, y0))
+                y0 += self.rule_line_h
+
+        # --- Кнопки (фиксированы внизу) ---
+        btn_bg = (30, 22, 12)
+        # Кнопка «2 Игрока»
+        pygame.draw.rect(self.screen, btn_bg, self.btn1_rect, border_radius=8)
+        pygame.draw.rect(self.screen, (80, 140, 220), self.btn1_rect, 3, border_radius=8)
+        t1 = self.font_big.render("⚔ 2 Игрока", True, (80, 160, 255))
+        self.screen.blit(t1, (self.btn1_rect.centerx - t1.get_width() // 2,
+                               self.btn1_rect.centery - t1.get_height() // 2))
+        # Кнопка «Против ИИ»
+        pygame.draw.rect(self.screen, btn_bg, self.btn2_rect, border_radius=8)
+        pygame.draw.rect(self.screen, (200, 60, 60), self.btn2_rect, 3, border_radius=8)
+        t2 = self.font_big.render("🤖 Против ИИ", True, (255, 80, 80))
+        self.screen.blit(t2, (self.btn2_rect.centerx - t2.get_width() // 2,
+                               self.btn2_rect.centery - t2.get_height() // 2))
+
+        # Подсказка скролла
+        hint = self.font_small.render("↑↓ / колёсико мыши — прокрутка правил", True, (100, 90, 70))
+        self.screen.blit(hint, ((WIDTH - hint.get_width()) // 2, HEIGHT - self.btn_h - 28))
+
+        pygame.display.flip()
+
+
+# ========================== ИИ-ПРОТИВНИК ==========================
+
+class AIPlayer:
+    """Тактический ИИ для Игрока 2. Использует эвристическую оценку ходов."""
+
+    DELAY_FRAMES = 18  # задержка между действиями (для визуальности)
+
+    def __init__(self, game):
+        self.game = game
+        self.player = 2
+        self._action_queue = []   # [(func, args), ...]
+        self._delay = 0
+
+    # ---------- Публичный интерфейс ----------
+
+    def start_turn(self):
+        """Планируем все ходы AI на этот ход и складываем в очередь."""
+        self._action_queue = []
+        g = self.game
+        alive = g.board.player_units(self.player)
+        max_act = min(g.max_units_per_turn, len(alive))
+        units_to_act = [u for u in alive if not u.done][:max_act]
+        for unit in units_to_act:
+            self._plan_unit(unit)
+        # Финальное: завершить ход
+        self._action_queue.append((g.end_turn, ()))
+
+    def step(self):
+        """Вызывается каждый кадр во время хода AI. Выполняет одно действие с задержкой."""
+        if not self._action_queue:
+            return
+        self._delay -= 1
+        if self._delay > 0:
+            return
+        fn, args = self._action_queue.pop(0)
+        fn(*args)
+        self._delay = self.DELAY_FRAMES
+
+    def is_done(self):
+        return len(self._action_queue) == 0
+
+    # ---------- Планирование хода юнита ----------
+
+    def _plan_unit(self, unit):
+        """Планируем действия одного юнита — добавляем в очередь."""
+        g = self.game
+        # Выбираем юнит
+        self._action_queue.append((self._select, (unit,)))
+
+        # Ищем лучшее действие для каждого очка хода
+        actions = self._best_actions(unit)
+        for fn, args in actions:
+            self._action_queue.append((fn, args))
+
+        # Пропускаем (заканчиваем ход юнита)
+        self._action_queue.append((g.next_unit, ()))
+
+    def _select(self, unit):
+        g = self.game
+        g.selected_unit = unit
+        unit.active = True
+        unit.moves_left = unit.max_moves
+        g.state = "move"
+        g.calc_moves(unit)
+
+    # ---------- Оценочная функция ----------
+
+    def _dist(self, r1, c1, r2, c2):
+        return abs(r1 - r2) + abs(c1 - c2)
+
+    def _nearest_enemy(self, unit):
+        g = self.game
+        enemies = g.board.player_units(1)
+        if not enemies:
+            return None, 9999
+        nearest = min(enemies, key=lambda e: self._dist(unit.row, unit.col, e.row, e.col))
+        return nearest, self._dist(unit.row, unit.col, nearest.row, nearest.col)
+
+    def _score_move(self, unit, nr, nc, is_attack=False, attack_target=None):
+        """Оценить конкретный ход/атаку — возвращает числовой счёт."""
+        score = 0
+        g = self.game
+
+        if is_attack and attack_target:
+            # Сколько урона нанесём
+            dmg = unit.damage
+            if g.fire_shield.get(1, False):
+                dmg = max(0, dmg - 2)
+            effective_dmg = max(0, dmg - max(0, attack_target.armor))
+            # Убиваем — огромный бонус
+            if attack_target.hp - effective_dmg <= 0:
+                score += 10000
+            else:
+                score += 100 * effective_dmg
+            # Добиваем слабого врага
+            if attack_target.hp <= unit.damage:
+                score += 500
+            return score
+
+        # Движение — оцениваем позицию
+        enemy, dist_before = self._nearest_enemy(unit)
+        if enemy:
+            dist_after = self._dist(nr, nc, enemy.row, enemy.col)
+            if dist_after < dist_before:
+                score += 20 * (dist_before - dist_after)
+
+        # Руины — тянуть артефакты выгодно
+        if g.board.is_in_ruins(nr, nc):
+            score += 50
+
+        # Башня мага — полезно если есть ингредиенты
+        mt = g.board.is_in_mage_tower(nr, nc)
+        if mt:
+            inv = g.inventory[self.player]
+            for sp in SPELL_RECIPES:
+                if can_craft(inv, sp["recipe"]):
+                    score += 200
+                    break
+            else:
+                score += 5
+
+        # Кавалерия агрессивнее
+        if unit.unit_type == "cavalry" and enemy:
+            dist_after = self._dist(nr, nc, enemy.row, enemy.col)
+            score += max(0, 10 - dist_after) * 3
+
+        # Лучник предпочитает держать дистанцию
+        if unit.unit_type == "archer" and enemy:
+            dist_after = self._dist(nr, nc, enemy.row, enemy.col)
+            if dist_after >= 2:
+                score += 10
+
+        return score
+
+    def _best_actions(self, unit):
+        """Возвращает список (fn, args) — лучшие действия для юнита."""
+        g = self.game
+        result = []
+        g.calc_moves(unit)
+
+        # Спецдействия: руины
+        if g.board.is_in_ruins(unit.row, unit.col) and unit.moves_left > 0:
+            result.append((g.try_draw_card, ()))
+            return result
+
+        # Спецдействия: башня мага
+        mt = g.board.is_in_mage_tower(unit.row, unit.col)
+        if mt:
+            mt.occupant = unit
+            inv = g.inventory[self.player]
+            for i, sp in enumerate(SPELL_RECIPES):
+                if can_craft(inv, sp["recipe"]):
+                    idx = i
+                    result.append((g.try_cast_spell, (idx,)))
+                    return result
+
+        # Крафт оружия если выгодно
+        inv = g.inventory[self.player]
+        for i, wp in enumerate(WEAPON_RECIPES):
+            if can_craft(inv, wp["recipe"]):
+                if wp["target"] == "any" or wp["target"] == unit.unit_type:
+                    result.append((g.try_craft_weapon, (i,)))
+
+        # Атака — ищем лучшую
+        best_atk_score = -1
+        best_atk_pos = None
+        for (ar, ac), target in g.jump_targets.items():
+            sc = self._score_move(unit, ar, ac, is_attack=True, attack_target=target)
+            if sc > best_atk_score:
+                best_atk_score = sc
+                best_atk_pos = (ar, ac)
+
+        # Лучник — стрельба
+        if unit.unit_type == "archer":
+            for (ar, ac) in g.attack_highlights:
+                target = g.board.unit_at(ar, ac)
+                if target and target.player != self.player:
+                    sc = self._score_move(unit, ar, ac, is_attack=True, attack_target=target)
+                    if sc > best_atk_score:
+                        best_atk_score = sc
+                        best_atk_pos = (ar, ac)
+
+        # Движение — ищем лучшее
+        best_mv_score = -1
+        best_mv_pos = None
+        for (mr, mc) in g.move_highlights:
+            sc = self._score_move(unit, mr, mc)
+            if sc > best_mv_score:
+                best_mv_score = sc
+                best_mv_pos = (mr, mc)
+
+        # Выбираем: атака или движение
+        if best_atk_pos and best_atk_score >= best_mv_score:
+            r, c = best_atk_pos
+            if unit.unit_type == "archer":
+                result.append((g.do_archer_shoot, (r, c)))
+            else:
+                result.append((g.do_jump_attack, (r, c)))
+        elif best_mv_pos:
+            result.append((g.move_unit, (best_mv_pos[0], best_mv_pos[1])))
+            # После движения — проверим атаку снова (рекурсивно не идём, просто добавляем)
+            # Планировщик добавит next_unit после
+
+        return result
+
+
 # ========================== ИГРА ==========================
 
 class Game:
-    def __init__(self):
-        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        pygame.display.set_caption("Рыцари и Замки")
-        self.clock = pygame.time.Clock()
+    def __init__(self, ai_mode=False, screen=None, clock=None):
+        if screen is None:
+            self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+            pygame.display.set_caption("Рыцари и Замки")
+        else:
+            self.screen = screen
+        self.clock = clock if clock else pygame.time.Clock()
         self.font = pygame.font.SysFont("Arial", 13)
         self.font_big = pygame.font.SysFont("Arial", 18, bold=True)
         self.font_title = pygame.font.SysFont("Arial", 24, bold=True)
@@ -409,6 +812,14 @@ class Game:
         # Скролл сайдбара
         self.sidebar_scroll = 0
 
+        # Предпросмотр фигурки
+        self.preview_unit = None
+
+        # AI режим
+        self.ai_mode = ai_mode
+        self.ai_player = AIPlayer(self) if ai_mode else None
+        self._ai_thinking = False  # True когда AI планирует ход
+
         self.start_turn()
 
     # -------------------- Ходы --------------------
@@ -420,6 +831,10 @@ class Game:
         for u in self.board.player_units(self.current_player):
             u.reset_moves()
         self.update_message()
+        # Если ход AI — запускаем планирование
+        if self.ai_mode and self.current_player == 2 and self.ai_player:
+            self.ai_player.start_turn()
+            self._ai_thinking = True
 
     def end_turn(self):
         enemy = 2 if self.current_player == 1 else 1
@@ -670,8 +1085,22 @@ class Game:
         if mx >= COLS * CELL_SIZE:
             self.handle_sidebar_click(mx, my)
             return
+
+        # Закрыть превью кликом вне юнита
         col = mx // CELL_SIZE
         row = my // CELL_SIZE
+        clicked_unit = self.board.unit_at(row, col)
+        if self.preview_unit is not None:
+            if clicked_unit == self.preview_unit:
+                self.preview_unit = None
+                return
+            else:
+                self.preview_unit = None
+
+        # Открыть превью при клике на любую фигурку (и сохранить обычный выбор)
+        if clicked_unit:
+            self.preview_unit = clicked_unit
+
         if self.state == "select":
             self.select_unit(row, col)
         elif self.state == "move":
@@ -720,21 +1149,18 @@ class Game:
         self.draw_units()
         self.draw_grid()
         self.draw_sidebar()
+        self.draw_unit_preview_popup()
         self.draw_popup()
         if self.state == "game_over":
             self.draw_game_over()
         pygame.display.flip()
 
     def draw_ground(self):
-        tile = self.sprites.get_ground()
         for r in range(ROWS):
             for c in range(COLS):
                 x, y = c * CELL_SIZE, r * CELL_SIZE
-                if tile:
-                    self.screen.blit(tile, (x, y))
-                else:
-                    pygame.draw.rect(self.screen, (60, 100, 40),
-                                     (x, y, CELL_SIZE, CELL_SIZE))
+                tile = self.sprites.ground_tile_a if (r + c) % 2 == 0 else self.sprites.ground_tile_b
+                self.screen.blit(tile, (x, y))
 
     def draw_structures(self):
         c1 = self.board.castle1
@@ -767,11 +1193,47 @@ class Game:
 
         ruins = self.board.ruins
         rx, ry = ruins.left_col * CELL_SIZE, ruins.top_row * CELL_SIZE
-        if self.sprites.monastery_img:
-            self.screen.blit(self.sprites.monastery_img, (rx, ry))
-        else:
-            pygame.draw.rect(self.screen, C_RUINS,
-                             (rx, ry, 2 * CELL_SIZE, 2 * CELL_SIZE))
+        self._draw_ruins(rx, ry)
+
+    def _draw_ruins(self, rx, ry):
+        """Рисует руины программно: разрушенные стены, обломки, мох."""
+        cs = CELL_SIZE
+        w, h = cs * 2, cs * 2
+        # Тёмная каменная основа
+        pygame.draw.rect(self.screen, (62, 57, 47), (rx, ry, w, h))
+        # Левый сломанный столб
+        pygame.draw.rect(self.screen, (105, 95, 80), (rx + 4, ry + 6, 10, h - 14))
+        pygame.draw.polygon(self.screen, (80, 72, 60), [
+            (rx + 4, ry + 6), (rx + 14, ry + 6),
+            (rx + 11, ry + 1), (rx + 7, ry + 3)])
+        # Правый сломанный столб (короче)
+        pygame.draw.rect(self.screen, (105, 95, 80), (rx + 22, ry + 14, 9, h - 22))
+        pygame.draw.polygon(self.screen, (80, 72, 60), [
+            (rx + 22, ry + 14), (rx + 31, ry + 14),
+            (rx + 28, ry + 10), (rx + 25, ry + 12)])
+        # Частичная стена (горизонтальный сегмент)
+        pygame.draw.rect(self.screen, (95, 87, 72), (rx + 4, ry + cs - 4, cs - 8, 6))
+        # Обломки и камни (случайные, но фиксированные позиции)
+        rubble = [
+            (rx + 18, ry + cs + 8,  14, 6),
+            (rx + 36, ry + cs + 2,  10, 5),
+            (rx + cs + 6, ry + 10,  12, 5),
+            (rx + cs + 18, ry + cs - 2, 16, 6),
+            (rx + cs + 4, ry + cs + 12, 10, 4),
+            (rx + 8,  ry + cs + 20, 18, 5),
+            (rx + cs - 4, ry + cs + 18, 12, 5),
+        ]
+        for bx, by, bw, bh in rubble:
+            pygame.draw.ellipse(self.screen, (92, 84, 68), (bx, by, bw, bh))
+            pygame.draw.ellipse(self.screen, (68, 62, 52), (bx + 1, by + 1, bw - 2, bh - 2), 1)
+        # Мох
+        moss = [(rx + 16, ry + cs + 16, 8, 4),
+                (rx + cs + 10, ry + cs + 8, 10, 4)]
+        for mx_, my_, mw, mh in moss:
+            pygame.draw.ellipse(self.screen, (55, 88, 42), (mx_, my_, mw, mh))
+        # Подпись
+        t = self.font_small.render("Руины", True, (160, 150, 120))
+        self.screen.blit(t, (rx + 4, ry + h - 14))
 
     def draw_highlights(self):
         if self.state != "move":
@@ -794,24 +1256,45 @@ class Game:
             self.screen.blit(s, (x, y))
 
     def draw_units(self):
+        cs = CELL_SIZE
         for u in self.board.units:
             if not u.is_alive():
                 continue
-            x = u.col * CELL_SIZE
-            y = u.row * CELL_SIZE
+            x = u.col * cs
+            y = u.row * cs
             sprite = self.sprites.get_unit(u.player, u.unit_type)
-            if sprite:
-                self.screen.blit(sprite, (x, y))
+
+            if u.unit_type == "cavalry":
+                # Кавалерия — крупный спрайт, центрирован на клетке
+                large = self.sprites.cavalry_size
+                off = (large - cs) // 2
+                draw_x = x - off
+                draw_y = y - off
+                if sprite:
+                    self.screen.blit(sprite, (draw_x, draw_y))
+                else:
+                    color = C_P1 if u.player == 1 else C_P2
+                    pygame.draw.rect(self.screen, color,
+                                     (draw_x + 4, draw_y + 4, large - 8, large - 8))
+                    t = self.font.render("C", True, C_WHITE)
+                    self.screen.blit(t, (x + cs // 3, y + cs // 3))
+                # Бронзовая рамка для кавалерии
+                border_col = (200, 160, 50) if u.player == 1 else (200, 80, 50)
+                pygame.draw.rect(self.screen, border_col, (x, y, cs, cs), 2)
             else:
-                color = C_P1 if u.player == 1 else C_P2
-                pygame.draw.rect(self.screen, color,
-                                 (x + 4, y + 4, CELL_SIZE - 8, CELL_SIZE - 8))
-                t = self.font.render(u.unit_type[0].upper(), True, C_WHITE)
-                self.screen.blit(t, (x + 16, y + 14))
+                if sprite:
+                    self.screen.blit(sprite, (x, y))
+                else:
+                    color = C_P1 if u.player == 1 else C_P2
+                    pygame.draw.rect(self.screen, color,
+                                     (x + 4, y + 4, cs - 8, cs - 8))
+                    t = self.font.render(u.unit_type[0].upper(), True, C_WHITE)
+                    self.screen.blit(t, (x + 16, y + 14))
+
             # HP/Armor бары
-            bw = CELL_SIZE - 4
+            bw = cs - 4
             bx = x + 2
-            by_hp = y + CELL_SIZE - 10
+            by_hp = y + cs - 10
             mhp = max(u.max_hp, u.hp, 1)
             pygame.draw.rect(self.screen, C_BLACK, (bx, by_hp, bw, 4))
             pygame.draw.rect(self.screen, C_HP,
@@ -822,10 +1305,9 @@ class Game:
             pygame.draw.rect(self.screen, C_ARMOR,
                              (bx, by_ar, max(0, int(bw * u.armor / mar)), 4))
             if u.active:
-                pygame.draw.rect(self.screen, C_GOLD,
-                                 (x, y, CELL_SIZE, CELL_SIZE), 2)
+                pygame.draw.rect(self.screen, C_GOLD, (x, y, cs, cs), 2)
             if u.done:
-                s = pygame.Surface((CELL_SIZE, CELL_SIZE), pygame.SRCALPHA)
+                s = pygame.Surface((cs, cs), pygame.SRCALPHA)
                 s.fill((0, 0, 0, 60))
                 self.screen.blit(s, (x, y))
 
@@ -1027,6 +1509,69 @@ class Game:
         self._sidebar_buttons.append(
             (pad, btn_y2, w, bh, do_surrender))
 
+    def draw_unit_preview_popup(self):
+        """Увеличенный спрайт фигурки при клике на неё."""
+        u = self.preview_unit
+        if u is None:
+            return
+        cs = CELL_SIZE
+        ps = cs * 4  # размер превью-спрайта
+        pw, ph = ps + 20, ps + 90
+        board_w = COLS * cs
+        px = (board_w - pw) // 2
+        py = (HEIGHT - ph) // 2
+
+        # Фон
+        bg = pygame.Surface((pw, ph), pygame.SRCALPHA)
+        bg.fill((15, 12, 8, 220))
+        self.screen.blit(bg, (px, py))
+
+        # Рамка в цвете игрока
+        border_col = C_P1 if u.player == 1 else C_P2
+        pygame.draw.rect(self.screen, border_col, (px, py, pw, ph), 3, border_radius=8)
+
+        # Большой спрайт
+        raw_sprite = None
+        if u.unit_type == "cavalry":
+            l_sheet_path = f"Units/{'Blue' if u.player == 1 else 'Red'} Units/Lancer/Lancer_Idle.png"
+            raw_sheet = load_sprite(l_sheet_path)
+            if raw_sheet:
+                raw_sprite = extract_frame(raw_sheet, 0, 320, 320, (ps, ps))
+        else:
+            key_map = {"knight": "Warrior/Warrior_Idle.png",
+                       "archer": "Archer/Archer_Idle.png"}
+            color = "Blue" if u.player == 1 else "Red"
+            path = f"Units/{color} Units/{key_map.get(u.unit_type, 'Warrior/Warrior_Idle.png')}"
+            raw_sheet = load_sprite(path)
+            if raw_sheet:
+                raw_sprite = extract_frame(raw_sheet, 0, 192, 192, (ps, ps))
+
+        sp_x = px + 10
+        sp_y = py + 5
+        if raw_sprite:
+            self.screen.blit(raw_sprite, (sp_x, sp_y))
+        else:
+            color = C_P1 if u.player == 1 else C_P2
+            pygame.draw.rect(self.screen, color, (sp_x, sp_y, ps, ps), border_radius=6)
+
+        # Имя и статы
+        names = {"knight": "Рыцарь", "cavalry": "Конный рыцарь", "archer": "Лучник"}
+        ty = py + ps + 10
+        t = self.font_big.render(names.get(u.unit_type, "?"), True, C_WHITE)
+        self.screen.blit(t, (px + (pw - t.get_width()) // 2, ty))
+        ty += 20
+        player_label = f"Игрок {u.player}"
+        t2 = self.font.render(player_label, True, border_col)
+        self.screen.blit(t2, (px + (pw - t2.get_width()) // 2, ty))
+        ty += 16
+        stats = f"HP {u.hp}/{u.max_hp}  Броня {u.armor}/{u.max_armor}  Урон {u.damage}  Ходы {u.max_moves}"
+        t3 = self.font_small.render(stats, True, C_TEXT)
+        self.screen.blit(t3, (px + (pw - t3.get_width()) // 2, ty))
+
+        # Подсказка
+        hint = self.font_small.render("Нажми снова чтобы закрыть", True, C_GRAY)
+        self.screen.blit(hint, (px + (pw - hint.get_width()) // 2, py + ph - 14))
+
     def draw_popup(self):
         if self.popup_text and self.popup_timer > 0:
             self.popup_timer -= 1
@@ -1055,31 +1600,55 @@ class Game:
 
     # -------------------- ГЛАВНЫЙ ЦИКЛ --------------------
 
-    def run(self):
+    def run_once(self):
+        """Запустить один матч. Возвращает управление после конца игры или ESC."""
         running = True
         while running:
             self.clock.tick(FPS)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    running = False
+                    pygame.quit()
+                    sys.exit()
                 elif event.type == pygame.MOUSEBUTTONDOWN:
-                    if event.button == 1:
+                    # Во время хода AI не принимаем клики на доску
+                    if self.ai_mode and self.current_player == 2:
+                        pass
+                    elif event.button == 1:
                         self.handle_click(*event.pos)
                     elif event.button == 3:
                         if self.selected_unit:
                             self.next_unit()
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
-                        running = False
+                        running = False   # возврат в меню
                     elif event.key == pygame.K_r and self.state == "game_over":
-                        self.__init__()
+                        running = False   # перезапуск через меню
                     elif event.key == pygame.K_SPACE:
-                        self.skip_unit()
+                        if not (self.ai_mode and self.current_player == 2):
+                            self.skip_unit()
+
+            # Шаг AI (если его ход)
+            if (self.ai_mode and self.current_player == 2
+                    and self.ai_player and self.state != "game_over"):
+                self.ai_player.step()
+
             self.draw()
+
+    # Оставляем run() для совместимости
+    def run(self):
+        self.run_once()
         pygame.quit()
         sys.exit()
 
 
 if __name__ == "__main__":
-    game = Game()
-    game.run()
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    pygame.display.set_caption("Рыцари и Замки")
+    clock = pygame.time.Clock()
+
+    while True:
+        menu = MenuScreen(screen, clock)
+        mode = menu.run()
+        ai_mode = (mode == "ai")
+        game = Game(ai_mode=ai_mode, screen=screen, clock=clock)
+        game.run_once()       # играем один матч — по ESC/R возвращаемся в меню
